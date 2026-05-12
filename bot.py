@@ -13,7 +13,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Load token from env
-BOT_TOKEN = os.getenv("8454552481:AAE5ha1HvydBHbPqmNb79scQQfNJmdlT0Hw")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # Shared browser instance
 browser: PerchanceBrowser = None
