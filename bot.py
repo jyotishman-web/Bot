@@ -1,64 +1,147 @@
-import requests
+import asyncio
+import logging
+import os
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from browser import PerchanceBrowser
 
-# Replace these
-TELEGRAM_BOT_TOKEN = "8454552481:AAE5ha1HvydBHbPqmNb79scQQfNJmdlT0Hw"
-OPENROUTER_API_KEY = "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"
+# Logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-MODEL = "openai/gpt-oss-20b:free"
+# Load token from env
+BOT_TOKEN = os.getenv("8454552481:AAE5ha1HvydBHbPqmNb79scQQfNJmdlT0Hw")
 
-# Start command
+# Shared browser instance
+browser: PerchanceBrowser = None
+
+# Queue to handle one request at a time
+queue = asyncio.Queue()
+queue_lock = asyncio.Lock()
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hello! I am your AI bot 🤖 Send me a message.")
+    await update.message.reply_text(
+        "👾 *Perchance AI Character Generator Bot*\n\n"
+        "Send me a character description and I'll generate an image for you!\n\n"
+        "Example: `warrior elf girl with blue hair`\n\n"
+        "⚠️ This bot generates *18+ content*. By using it, you confirm you are 18 or older.",
+        parse_mode="Markdown"
+    )
 
-# AI chat function
-def ask_ai(user_text):
-    url = "https://openrouter.ai/api/v1/chat/completions"
 
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📖 *How to use:*\n\n"
+        "Just send any character description as a message.\n\n"
+        "🔹 Good prompts:\n"
+        "• `anime girl with red eyes and silver hair`\n"
+        "• `muscular knight in dark armor`\n"
+        "• `cute wizard with a magic staff`\n\n"
+        "⏳ Generation takes about 10-20 seconds.\n"
+        "📋 Requests are queued if multiple users send at once.",
+        parse_mode="Markdown"
+    )
 
-    data = {
-        "model": MODEL,
-        "messages": [
-            {"role": "user", "content": user_text}
-        ]
-    }
 
-    try:
-        response = requests.post(url, headers=headers, json=data, timeout=60)
-        result = response.json()
+async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    prompt = update.message.text.strip()
+    user = update.message.from_user
 
-        return result["choices"][0]["message"]["content"]
+    if not prompt:
+        await update.message.reply_text("Please send a character description!")
+        return
 
-    except Exception as e:
-        return f"Error: {e}"
+    logger.info(f"User {user.id} ({user.username}) requested: {prompt}")
 
-# Handle user messages
-async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
+    # Tell user we received it
+    status_msg = await update.message.reply_text(
+        f"📋 Your request has been queued...\n\n*Prompt:* `{prompt}`",
+        parse_mode="Markdown"
+    )
 
-    await update.message.reply_text("Thinking...")
+    # Add to queue
+    await queue.put((update, context, prompt, status_msg))
 
-    reply = ask_ai(user_text)
 
-    if len(reply) > 4000:
-        reply = reply[:4000]
+async def process_queue():
+    """Background worker that processes one generation at a time."""
+    while True:
+        update, context, prompt, status_msg = await queue.get()
+        try:
+            await status_msg.edit_text(
+                f"⚙️ Generating your character...\n\n*Prompt:* `{prompt}`\n\n⏳ Please wait 10-20 seconds...",
+                parse_mode="Markdown"
+            )
 
-    await update.message.reply_text(reply)
+            image_path = await browser.generate(prompt)
 
-# Main
+            if image_path:
+                await update.message.reply_photo(
+                    photo=open(image_path, "rb"),
+                    caption=f"✅ *Done!*\n\n*Prompt:* `{prompt}`",
+                    parse_mode="Markdown"
+                )
+                await status_msg.delete()
+                # Clean up temp image
+                if os.path.exists(image_path):
+                    os.remove(image_path)
+            else:
+                await status_msg.edit_text(
+                    "❌ Generation failed. The site may be busy or the prompt was rejected. Please try again."
+                )
+
+        except Exception as e:
+            logger.error(f"Error processing request: {e}")
+            await status_msg.edit_text(
+                "❌ Something went wrong. Please try again later."
+            )
+        finally:
+            queue.task_done()
+            # Small delay between requests to avoid hammering the site
+            await asyncio.sleep(3)
+
+
+async def post_init(application: Application):
+    """Called after bot starts — initialize browser and queue worker."""
+    global browser
+    logger.info("Initializing browser...")
+    browser = PerchanceBrowser()
+    await browser.init()
+    logger.info("Browser ready!")
+
+    # Start queue processor as background task
+    asyncio.create_task(process_queue())
+
+
+async def post_shutdown(application: Application):
+    """Called on shutdown — close browser."""
+    if browser:
+        await browser.close()
+
+
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN environment variable not set!")
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generate))
 
-    print("Bot running...")
-    app.run_polling()
+    logger.info("Bot is running...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
