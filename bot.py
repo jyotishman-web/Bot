@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from browser import PerchanceBrowser
@@ -11,6 +12,34 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+def load_env_file(env_path: Path = Path(".env")) -> None:
+    """Load simple KEY=VALUE pairs from .env into process environment."""
+    if not env_path.exists():
+        return
+
+    try:
+        raw_content = env_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        logger.error("Failed to decode %s as UTF-8; skipping env loading.", env_path)
+        return
+
+    for raw_line in raw_content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_env_file()
 
 # Load token from env
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -59,8 +88,7 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Tell user we received it
     status_msg = await update.message.reply_text(
-        f"📋 Your request has been queued...\n\n*Prompt:* `{prompt}`",
-        parse_mode="Markdown"
+        f"📋 Your request has been queued...\n\nPrompt: {prompt}"
     )
 
     # Add to queue
@@ -73,18 +101,17 @@ async def process_queue():
         update, context, prompt, status_msg = await queue.get()
         try:
             await status_msg.edit_text(
-                f"⚙️ Generating your character...\n\n*Prompt:* `{prompt}`\n\n⏳ Please wait 10-20 seconds...",
-                parse_mode="Markdown"
+                f"⚙️ Generating your character...\n\nPrompt: {prompt}\n\n⏳ Please wait 10-20 seconds..."
             )
 
             image_path = await browser.generate(prompt)
 
             if image_path:
-                await update.message.reply_photo(
-                    photo=open(image_path, "rb"),
-                    caption=f"✅ *Done!*\n\n*Prompt:* `{prompt}`",
-                    parse_mode="Markdown"
-                )
+                with open(image_path, "rb") as image_file:
+                    await update.message.reply_photo(
+                        photo=image_file,
+                        caption=f"✅ Done!\n\nPrompt: {prompt}"
+                    )
                 await status_msg.delete()
                 # Clean up temp image
                 if os.path.exists(image_path):
