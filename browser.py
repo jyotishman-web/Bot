@@ -168,7 +168,7 @@ class PerchanceBrowser:
                 return None
 
             # Clear and type prompt
-            await input_el.triple_click()
+            await input_el.click(click_count=3)
             await input_el.fill(prompt)
             await asyncio.sleep(0.5)
 
